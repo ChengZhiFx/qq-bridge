@@ -669,6 +669,7 @@ server.tool(
         keywords: z.array(z.string()).optional().describe('出现任意关键词时唤醒'),
         question: z.boolean().optional().describe('被直接提问/点名挑战时唤醒'),
         poke: z.boolean().optional().describe('有人拍一拍时唤醒（群聊包括拍你和拍别人，私聊为对方拍你）'),
+        imageMessage: z.boolean().optional().describe('收到普通图片（照片/截图）时唤醒；收藏/市场表情包不算图片，不会触发'),
         anyMessage: z.boolean().optional().describe('任意新消息都唤醒（活跃模式）'),
         probability: z.number().optional().describe('普通消息按该概率随机唤醒（0~1）')
       }).optional(),
@@ -735,7 +736,7 @@ server.tool(
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
     messages: z.union([z.string(), z.array(z.string()).min(1)]).describe('要发送的内容：字符串=一条；数组=分多条'),
     replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-    atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中用于点名某个人；与引用二选一即可，不要滥用）'),
+    atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中用于点名某个人；与引用二选一即可，不要滥用）。@全体成员传 "all"：仅管理员配置的白名单群可用，机器人在该群须是管理员/群主，否则发送前就被拒绝'),
     gapMode: z.enum(['auto', 'fixed', 'byLength']).optional().describe('auto=桥接随机；fixed=固定间隔；byLength=按字数计算'),
     gapMs: z.number().optional().describe('fixed 模式下的统一间隔（毫秒）'),
     gaps: z.array(z.number()).optional().describe('fixed 模式下逐条间隔（长度=条数-1）')
@@ -1150,7 +1151,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
       stickerId: z.string().describe('表情标识：emoji_id / md5 / 图片 URL（来自 qq_list_stickers）'),
       replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
-      atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）')
+      atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）；@全体成员传 "all"（仅限白名单群）')
     },
     async ({ key, token, stickerId, replyToMessageId, atUserId }) => {
       try {
@@ -1163,6 +1164,58 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `发送表情失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.sendFace !== false) {
+  server.tool(
+    'qq_send_face',
+    '发送 QQ 系统表情（经典小黄脸）。face 传表情名称（如“呲牙”“捂脸”“666”）或数字编号；不确定名称/编号时先用 qq_search_faces 搜索。注意“狗头”是歧义俗名（一部分人指 doge 柴犬、一部分人指 汪汪），直接发会返回候选列表，按语境选一个再发即可。可选 text 会和表情在同一条消息里发出（如 text=“收到”+ face=OK），适合句尾点缀；只发一个表情就省略 text。引用/点名用 replyToMessageId / atUserId。系统表情比收藏表情包更轻量：回一句、收尾、接梗都顺手，频率可比表情包略高，但别每条都带，正式话题不硬塞。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      face: z.union([z.number(), z.string()]).describe('系统表情：名称（呲牙/捂脸/微笑/大哭/666…）或数字编号；俗名“狗头”有歧义会返回候选'),
+      text: z.string().optional().describe('可选：与表情同条发送的文字（≤500 字，通常是短语），省略则只发表情'),
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
+      atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）；@全体成员传 "all"（仅限白名单群）')
+    },
+    async ({ key, token, face, text, replyToMessageId, atUserId }) => {
+      try {
+        const data = await agentApi('/api/socialV2/send-face', {
+          method: 'POST',
+          body: JSON.stringify({ key, face: String(face), text: text || '', replyToMessageId, atUserId: atUserId ?? null }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 300000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发送系统表情失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+
+  server.tool(
+    'qq_search_faces',
+    '搜索 QQ 系统表情（小黄脸）目录：按名称或编号找可用表情，返回 id、名称、所在分组。qq_send_face 的 face 参数不确定时先用这里查（如“笑”“哭”“赞”）。常用参考：14=微笑、13=呲牙、9=大哭、11=发怒、28=憨笑、101=坏笑、264=捂脸、271=吃瓜、357=裂开、354=尊嘟假嘟、356=666、179=doge、277=汪汪（“狗头”俗名两者都指，按语境挑）、124=OK、123=NO、76=赞、201=点赞、66=爱心、64=玫瑰、49=拥抱。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      query: z.string().describe('搜索词：名称（或其中一字）或数字编号'),
+      limit: z.number().int().min(1).max(30).optional().describe('最多返回条数，默认 10')
+    },
+    async ({ key, token, query, limit }) => {
+      try {
+        const data = await agentApi('/api/socialV2/search-faces', {
+          method: 'POST',
+          body: JSON.stringify({ key, query: String(query), limit: limit || 10 }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `搜索系统表情失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

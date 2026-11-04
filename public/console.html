@@ -2050,6 +2050,7 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="stickerNote"> <span><b>qq_sticker_note</b><span class="meta">给表情记录本地含义/标签/用法</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setStickerRemark"> <span><b>qq_set_sticker_remark</b><span class="meta">修改 QQ 官方表情备注（默认禁用，慎用）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendVoice"> <span><b>qq_send_voice / qq_list_voices</b><span class="meta">发送语音条（只能发语音库里的音频；偶然而为的强表达）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendFace"> <span><b>qq_send_face / qq_search_faces</b><span class="meta">发送/搜索 QQ 系统小黄脸表情（可附短语同条发出）</span></span></label>
       </div>
       <div class="meta" style="margin-top:6px">二代黑话学习：AI 可用 <code>qq_slang_submit</code> 提交陌生词，也可由桥接自动提取；管理员在「黑话词库」页面筛选确认后，词条会自动写入黑话提示词并注入 <code>qq_get_prompt</code> 与后续唤醒。</div>
 
@@ -2439,6 +2440,8 @@ button:active:not(:disabled) {
       <h2>白名单 / 管理员</h2>
       <label>允许的群号（逗号分隔）</label>
       <input type="text" id="wlGroups" placeholder="123456789, 123456">
+      <label>@全体成员 白名单群号（逗号分隔；仅这些群允许 at=all，机器人须为该群管理员/群主）</label>
+      <input type="text" id="wlAtAllGroups" placeholder="留空 = 全部禁止">
       <label>允许的私聊 QQ（逗号分隔）</label>
       <input type="text" id="wlPrivate" placeholder="123456789">
       <label>管理员 QQ（ownerQQ，最高权限）</label>
@@ -2982,6 +2985,7 @@ async function refreshWhitelist() {
   try {
     const w = await api('/api/whitelist');
     document.getElementById('wlGroups').value = (w.allow.groups || []).join(', ');
+    document.getElementById('wlAtAllGroups').value = (w.allow.atAllGroups || []).join(', ');
     document.getElementById('wlPrivate').value = (w.allow.private || []).join(', ');
     document.getElementById('ownerQQ').value = w.ownerQQ != null ? String(w.ownerQQ) : '';
     document.getElementById('dnGroups').value = (w.deny.groups || []).join(', ');
@@ -3157,7 +3161,7 @@ document.getElementById('silentOff').addEventListener('click', async () => { awa
 document.getElementById('wlSave').addEventListener('click', async () => {
   const parse = (s) => s.split(/[,，\s]+/).map(x => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
   const r = await api('/api/whitelist', 'POST', {
-    allow: { private: parse(document.getElementById('wlPrivate').value), groups: parse(document.getElementById('wlGroups').value) },
+    allow: { private: parse(document.getElementById('wlPrivate').value), groups: parse(document.getElementById('wlGroups').value), atAllGroups: parse(document.getElementById('wlAtAllGroups').value) },
     deny: { private: parse(document.getElementById('dnPrivate').value), groups: parse(document.getElementById('dnGroups').value) },
     ownerQQ: document.getElementById('ownerQQ').value.trim()
   });
@@ -3475,6 +3479,7 @@ function summarizeToolArgs(tool, args) {
     if (tr.nameMention) trigs.push('名字');
     if (tr.question) trigs.push('提问');
     if (tr.poke) trigs.push('拍一拍');
+    if (tr.imageMessage) trigs.push('图片');
     if (Array.isArray(tr.keywords) && tr.keywords.length) trigs.push('关键词:' + tr.keywords.join(','));
     if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) trigs.push('指定成员:' + tr.speakerIds.join(','));
     if (tr.anyMessage) trigs.push('anyMessage');
@@ -3685,6 +3690,7 @@ function formatWakeStatus(r) {
   if (Array.isArray(tr.speakerIds) && tr.speakerIds.length) conds.push('指定成员：' + tr.speakerIds.join('、'));
   if (tr.question) conds.push('提问');
   if (tr.poke) conds.push('拍一拍');
+  if (tr.imageMessage) conds.push('图片（表情包不算）');
   if (tr.anyMessage) conds.push('任何消息');
   if (Number(tr.probability) > 0) conds.push('普通消息概率 ' + Number(tr.probability));
   lines.push(`<div><b>提前唤醒条件：</b>${conds.length ? esc(conds.join('；')) : '（无）'}</div>`);
