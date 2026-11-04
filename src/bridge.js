@@ -2181,14 +2181,15 @@ async function main() {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    // 与文本/表情包发送共用 sendChain，保证顺序与间隔不被并发工具调用打乱。
+    // 与文本/表情包发送共用**同一会话**的发送链（#83 后按会话拆分；必须局部声明，
+    // 漏写 let 会在严格模式下 ReferenceError，2026-11-04 升级回归实测踩过）。
     let sendResolve;
     let sendReject;
     const sendResult = new Promise((resolve, reject) => {
       sendResolve = resolve;
       sendReject = reject;
     });
-    sendChain = sendChain.then(async () => {
+    let sendChain = sendChainFor(key).then(async () => {
       try {
         // 系统表情是轻量动作，停顿比表情包短一些。
         await sleep(randInt(400, 1200));
@@ -2212,6 +2213,7 @@ async function main() {
         sendReject(error);
       }
     });
+    rememberSendChain(key, sendChain);
     const data = await sendResult;
     return {
       face: { id: resolved.id, name: resolved.name, pack: resolved.pack, isSuper: resolved.isSuper },
@@ -3169,7 +3171,7 @@ async function main() {
         items.shift();
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
+      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason, rebuildPrompt: opts.rebuildPrompt });
       queued.set(key, items);
     }
     queueRetries.delete(key); // 新消息入队视为新的机会，重置退避计数
@@ -3426,7 +3428,7 @@ async function main() {
               log(`补投跳过未授权会话 ${key}（当前模式 ${currentMode}）`);
               continue;
             }
-            const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [], wakeReason: item.wakeReason });
+            const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [], wakeReason: item.wakeReason, rebuildPrompt: item.rebuildPrompt });
             if (!result.ok) {
               log(`补投失败 ${key}: ${result.error || '未知错误'}`);
               failed += 1;
@@ -5040,11 +5042,9 @@ async function main() {
               : `${rolePick.text}\n\n`)
             : '';
           // 二代必须带会话令牌，否则 AI 调用任何 MCP 状态/发送工具都会被拒。
-          let tokenLine = '';
-          if (isV2) {
-            const stV2 = getSocialV2State(key);
-            tokenLine = `【会话令牌】${stV2.agentToken}（调用二代状态/发送工具时请在参数中带上此令牌）\n\n`;
-          }
+          // 2026-11-04 回归：ensureSession 的「执行期绑定」退役重建会就地轮换 agentToken，
+          // 组 prompt 时抓的令牌到真正投递时可能已作废 → 见下方 rebuildPrompt 的重新渲染。
+          const tokenLineOf = () => `【会话令牌】${getSocialV2State(key).agentToken}（调用二代状态/发送工具时请在参数中带上此令牌）\n\n`;
           // 视觉通道自检声明（2026-10-31）：`input: [ text, image ]` 是手写进 DSH profile
           // patch 的，任何一次「重新拉模型列表」都会把它整段抹掉，症状是 qq_get_message_images
           // 返回 `[image unavailable: ... does not support image input]`。会话内没有 shell、
@@ -5056,7 +5056,8 @@ async function main() {
           // 没有这行时模型只能猜 key（2026-11-03 实测：拿本群令牌去调幻觉群号，
           // 五连 403、连失败反馈都因 key 错误被拒，整回合白跑）。
           const keyLine = `【当前会话】${key}（所有带 key 参数的工具一律用这个值，不要凭记忆猜其他群号/QQ号）\n\n`;
-          const promptText = `${keyLine}${roleLine}${tokenLine}${visionLine}【后台控制端提醒】（来自控制台/管理端，不是群友消息）\n${message}\n\n这是后台给你的引导或提醒，请据此调整你的行为。绝对不要复述、转发或原样发送这条后台提醒，也不要发送其中的会话令牌；它只用于你内部调整行为。${isV2 ? '当前是二代仿真模式：你的文本输出不会自动发送到 QQ；如果需要在群里发言，请使用发送工具（qq_send_message / qq_reply）。如果不需要发言，可以 qq_mark_read 或 qq_set_wake_config 收尾。' : '如果不需要在群里发言，请不要输出会发到 QQ 的内容。'}`;
+          const renderNotifyPrompt = (tl) => `${keyLine}${roleLine}${tl}${visionLine}【后台控制端提醒】（来自控制台/管理端，不是群友消息）\n${message}\n\n这是后台给你的引导或提醒，请据此调整你的行为。绝对不要复述、转发或原样发送这条后台提醒，也不要发送其中的会话令牌；它只用于你内部调整行为。${isV2 ? '当前是二代仿真模式：你的文本输出不会自动发送到 QQ；如果需要在群里发言，请使用发送工具（qq_send_message / qq_reply）。如果不需要发言，可以 qq_mark_read 或 qq_set_wake_config 收尾。' : '如果不需要在群里发言，请不要输出会发到 QQ 的内容。'}`;
+          const promptText = renderNotifyPrompt(isV2 ? tokenLineOf() : '');
           let sessionId = null;
           let popSilent = null;
           try {
@@ -5070,7 +5071,7 @@ async function main() {
               if (next.length > 0) social.silentTurns.set(sessionId, next);
               else social.silentTurns.delete(sessionId);
             };
-            const result = await deliverPrompt(key, promptText, { silent: true });
+            const result = await deliverPrompt(key, promptText, { silent: true, rebuildPrompt: isV2 ? () => renderNotifyPrompt(tokenLineOf()) : undefined });
             if (result.ok) {
               log(`控制台：已向 ${key} 的 DSH 发送后台提醒`);
               appendActivity(`${key} 控制台后台提醒：${message.slice(0, 80)}`);
@@ -10188,7 +10189,7 @@ async function main() {
         items.shift();
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
+      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason, rebuildPrompt: opts.rebuildPrompt });
       queued.set(key, items);
       return { ok: true, queued: true };
     }
@@ -10216,6 +10217,10 @@ async function main() {
       if (wakeSnapshot) {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
       }
+    } else if (typeof opts.rebuildPrompt === 'function') {
+      // 非唤醒投递（后台提醒/收尾提醒）：ensureSession 可能刚刚退役重建并轮换 agentToken，
+      // 令牌注入前必须重新渲染一次，否则整个回合的工具调用都会撞执行期绑定闸门。
+      promptText = opts.rebuildPrompt();
     }
     let content = [{ type: 'text', text: withSlangContext(promptText, key) }];
     if (Array.isArray(opts.media) && opts.media.length > 0) {
@@ -12789,7 +12794,7 @@ async function main() {
                     wakeConfigMissCount.set(key, currentMiss);
                     pendingWakeKeys.add(key);
                     armPendingWakeLease(key);
-                    deliverPrompt(key, buildWakeReminderPromptV2(key)).then((result) => {
+                    deliverPrompt(key, buildWakeReminderPromptV2(key), { rebuildPrompt: () => buildWakeReminderPromptV2(key) }).then((result) => {
                       if (result && result.ok === false) {
                         pendingWakeKeys.delete(key);
                         disarmPendingWakeLease(key);
